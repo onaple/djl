@@ -17,6 +17,7 @@ import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.djl.modality.Classifications;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDList;
+import ai.djl.ndarray.NDManager;
 import ai.djl.translate.ArgumentsUtil;
 import ai.djl.translate.Batchifier;
 import ai.djl.translate.TranslateException;
@@ -36,13 +37,19 @@ public class FillMaskTranslator implements Translator<String, Classifications> {
     private String maskToken;
     private long maskTokenId;
     private int topK;
+    private boolean includeTokenTypes;
     private Batchifier batchifier;
 
     FillMaskTranslator(
-            HuggingFaceTokenizer tokenizer, String maskToken, int topK, Batchifier batchifier) {
+            HuggingFaceTokenizer tokenizer,
+            String maskToken,
+            int topK,
+            boolean includeTokenTypes,
+            Batchifier batchifier) {
         this.tokenizer = tokenizer;
         this.maskToken = maskToken;
         this.topK = topK;
+        this.includeTokenTypes = includeTokenTypes;
         this.batchifier = batchifier;
         Encoding encoding = tokenizer.encode(maskToken, false, false);
         maskTokenId = encoding.getIds()[0];
@@ -59,27 +66,48 @@ public class FillMaskTranslator implements Translator<String, Classifications> {
     public NDList processInput(TranslatorContext ctx, String input) throws TranslateException {
         Encoding encoding = tokenizer.encode(input);
         long[] indices = encoding.getIds();
-        int maskIndex = getMaskIndex(indices, maskToken, maskTokenId);
+        int maskIndex = getMaskIndex(indices);
         ctx.setAttachment("maskIndex", maskIndex);
-        return encoding.toNDList(ctx.getNDManager(), false);
+        return encoding.toNDList(ctx.getNDManager(), includeTokenTypes);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public NDList batchProcessInput(TranslatorContext ctx, List<String> inputs)
+            throws TranslateException {
+        NDManager manager = ctx.getNDManager();
+        Encoding[] encodings = tokenizer.batchEncode(inputs);
+        NDList[] batch = new NDList[encodings.length];
+        int[] maskIndices = new int[encodings.length];
+        ctx.setAttachment("maskIndices", maskIndices);
+        for (int i = 0; i < batch.length; ++i) {
+            long[] indices = encodings[i].getIds();
+            maskIndices[i] = getMaskIndex(indices);
+            batch[i] = encodings[i].toNDList(manager, includeTokenTypes);
+        }
+        return batchifier.batchify(batch);
     }
 
     /** {@inheritDoc} */
     @Override
     public Classifications processOutput(TranslatorContext ctx, NDList list) {
         int maskIndex = (int) ctx.getAttachment("maskIndex");
-        return toClassifications(tokenizer, list, maskIndex, topK);
+        return toClassifications(list, maskIndex);
     }
 
     /** {@inheritDoc} */
     @Override
-    public FillMaskBatchTranslator toBatchTranslator(Batchifier batchifier) {
-        tokenizer.enableBatch();
-        return new FillMaskBatchTranslator(tokenizer, maskToken, topK, batchifier);
+    public List<Classifications> batchProcessOutput(TranslatorContext ctx, NDList list) {
+        NDList[] batch = batchifier.unbatchify(list);
+        int[] maskIndices = (int[]) ctx.getAttachment("maskIndices");
+        List<Classifications> ret = new ArrayList<>(maskIndices.length);
+        for (int i = 0; i < batch.length; ++i) {
+            ret.add(toClassifications(batch[i], maskIndices[i]));
+        }
+        return ret;
     }
 
-    static int getMaskIndex(long[] indices, String maskToken, long maskTokenId)
-            throws TranslateException {
+    private int getMaskIndex(long[] indices) throws TranslateException {
         int maskIndex = -1;
         for (int i = 0; i < indices.length; ++i) {
             if (indices[i] == maskTokenId) {
@@ -95,8 +123,7 @@ public class FillMaskTranslator implements Translator<String, Classifications> {
         return maskIndex;
     }
 
-    static Classifications toClassifications(
-            HuggingFaceTokenizer tokenizer, NDList output, int maskIndex, int topK) {
+    private Classifications toClassifications(NDList output, int maskIndex) {
         NDArray prob = output.get(0).get(maskIndex).softmax(0);
         NDArray array = prob.argSort(0, false);
         long[] classIds = new long[topK];
@@ -139,6 +166,7 @@ public class FillMaskTranslator implements Translator<String, Classifications> {
         private HuggingFaceTokenizer tokenizer;
         private String maskedToken = "[MASK]";
         private int topK = 5;
+        private boolean includeTokenTypes;
         private Batchifier batchifier = Batchifier.STACK;
 
         Builder(HuggingFaceTokenizer tokenizer) {
@@ -168,6 +196,17 @@ public class FillMaskTranslator implements Translator<String, Classifications> {
         }
 
         /**
+         * Sets if include token types for the {@link Translator}.
+         *
+         * @param includeTokenTypes true to include token types
+         * @return this builder
+         */
+        public Builder optIncludeTokenTypes(boolean includeTokenTypes) {
+            this.includeTokenTypes = includeTokenTypes;
+            return this;
+        }
+
+        /**
          * Sets the {@link Batchifier} for the {@link Translator}.
          *
          * @param batchifier true to include token types
@@ -186,6 +225,7 @@ public class FillMaskTranslator implements Translator<String, Classifications> {
         public void configure(Map<String, ?> arguments) {
             optMaskToken(ArgumentsUtil.stringValue(arguments, "maskToken", "[MASK]"));
             optTopK(ArgumentsUtil.intValue(arguments, "topK", 5));
+            optIncludeTokenTypes(ArgumentsUtil.booleanValue(arguments, "includeTokenTypes"));
             String batchifierStr = ArgumentsUtil.stringValue(arguments, "batchifier", "stack");
             optBatchifier(Batchifier.fromString(batchifierStr));
         }
@@ -197,7 +237,8 @@ public class FillMaskTranslator implements Translator<String, Classifications> {
          * @throws IOException if I/O error occurs
          */
         public FillMaskTranslator build() throws IOException {
-            return new FillMaskTranslator(tokenizer, maskedToken, topK, batchifier);
+            return new FillMaskTranslator(
+                    tokenizer, maskedToken, topK, includeTokenTypes, batchifier);
         }
     }
 }

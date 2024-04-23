@@ -118,6 +118,8 @@ public final class LibUtils {
                 }
             }
         }
+        String libExclusion = Utils.getEnvOrSystemProperty("PYTORCH_LIBRARY_EXCLUSION", "");
+        Set<String> exclusion = new HashSet<>(Arrays.asList(libExclusion.split(",")));
         boolean isCuda = libTorch.flavor.contains("cu");
         List<String> deferred =
                 Arrays.asList(
@@ -137,7 +139,8 @@ public final class LibUtils {
             paths.filter(
                             path -> {
                                 String name = path.getFileName().toString();
-                                if (!LIB_PATTERN.matcher(name).matches()) {
+                                if (!LIB_PATTERN.matcher(name).matches()
+                                        || exclusion.contains(name)) {
                                     return false;
                                 } else if (!isCuda
                                         && name.contains("nvrtc")
@@ -231,10 +234,21 @@ public final class LibUtils {
         String djlVersion = libTorch.apiVersion;
         String flavor = libTorch.flavor;
 
+        // Looking for JNI in libTorch.dir first
+        Path libDir = libTorch.dir.toAbsolutePath();
+        Path path = libDir.resolve(djlVersion + '-' + JNI_LIB_NAME);
+        if (Files.exists(path)) {
+            return path;
+        }
+        path = libDir.resolve(JNI_LIB_NAME);
+        if (Files.exists(path)) {
+            return path;
+        }
+
         // always use cache dir, cache dir might be different from libTorch.dir
         Path cacheDir = Utils.getEngineCacheDir("pytorch");
         Path dir = cacheDir.resolve(version + '-' + flavor + '-' + classifier);
-        Path path = dir.resolve(djlVersion + '-' + JNI_LIB_NAME);
+        path = dir.resolve(djlVersion + '-' + JNI_LIB_NAME);
         if (Files.exists(path)) {
             return path;
         }
@@ -554,8 +568,10 @@ public final class LibUtils {
             if (flavor == null || flavor.isEmpty()) {
                 if (CudaUtils.getGpuCount() > 0) {
                     flavor = "cu" + CudaUtils.getCudaVersionString() + "-precxx11";
-                } else {
+                } else if ("linux".equals(platform.getOsPrefix())) {
                     flavor = "cpu-precxx11";
+                } else {
+                    flavor = "cpu";
                 }
             }
         }

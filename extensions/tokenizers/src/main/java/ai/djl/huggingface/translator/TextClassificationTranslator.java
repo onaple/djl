@@ -17,6 +17,7 @@ import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.djl.modality.Classifications;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDList;
+import ai.djl.ndarray.NDManager;
 import ai.djl.translate.ArgumentsUtil;
 import ai.djl.translate.Batchifier;
 import ai.djl.translate.Translator;
@@ -35,11 +36,14 @@ import java.util.Map;
 public class TextClassificationTranslator implements Translator<String, Classifications> {
 
     private HuggingFaceTokenizer tokenizer;
+    private boolean includeTokenTypes;
     private Batchifier batchifier;
     private PretrainedConfig config;
 
-    TextClassificationTranslator(HuggingFaceTokenizer tokenizer, Batchifier batchifier) {
+    TextClassificationTranslator(
+            HuggingFaceTokenizer tokenizer, boolean includeTokenTypes, Batchifier batchifier) {
         this.tokenizer = tokenizer;
+        this.includeTokenTypes = includeTokenTypes;
         this.batchifier = batchifier;
     }
 
@@ -63,23 +67,39 @@ public class TextClassificationTranslator implements Translator<String, Classifi
     @Override
     public NDList processInput(TranslatorContext ctx, String input) {
         Encoding encoding = tokenizer.encode(input);
-        return encoding.toNDList(ctx.getNDManager(), false);
+        return encoding.toNDList(ctx.getNDManager(), includeTokenTypes);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public NDList batchProcessInput(TranslatorContext ctx, List<String> inputs) {
+        NDManager manager = ctx.getNDManager();
+        Encoding[] encodings = tokenizer.batchEncode(inputs);
+        NDList[] batch = new NDList[encodings.length];
+        for (int i = 0; i < encodings.length; ++i) {
+            batch[i] = encodings[i].toNDList(manager, includeTokenTypes);
+        }
+        return batchifier.batchify(batch);
     }
 
     /** {@inheritDoc} */
     @Override
     public Classifications processOutput(TranslatorContext ctx, NDList list) {
-        return toClassifications(config, list);
+        return toClassifications(list);
     }
 
     /** {@inheritDoc} */
     @Override
-    public TextClassificationBatchTranslator toBatchTranslator(Batchifier batchifier) {
-        tokenizer.enableBatch();
-        return new TextClassificationBatchTranslator(tokenizer, batchifier);
+    public List<Classifications> batchProcessOutput(TranslatorContext ctx, NDList list) {
+        NDList[] batches = batchifier.unbatchify(list);
+        List<Classifications> ret = new ArrayList<>(batches.length);
+        for (NDList batch : batches) {
+            ret.add(toClassifications(batch));
+        }
+        return ret;
     }
 
-    static Classifications toClassifications(PretrainedConfig config, NDList list) {
+    private Classifications toClassifications(NDList list) {
         NDArray logits = list.get(0);
         int size = config.id2label.size();
         if ("multi_label_classification".equals(config.problemType) || size == 1) {
@@ -127,10 +147,22 @@ public class TextClassificationTranslator implements Translator<String, Classifi
     public static final class Builder {
 
         private HuggingFaceTokenizer tokenizer;
+        private boolean includeTokenTypes;
         private Batchifier batchifier = Batchifier.STACK;
 
         Builder(HuggingFaceTokenizer tokenizer) {
             this.tokenizer = tokenizer;
+        }
+
+        /**
+         * Sets if include token types for the {@link Translator}.
+         *
+         * @param includeTokenTypes true to include token types
+         * @return this builder
+         */
+        public Builder optIncludeTokenTypes(boolean includeTokenTypes) {
+            this.includeTokenTypes = includeTokenTypes;
+            return this;
         }
 
         /**
@@ -150,6 +182,7 @@ public class TextClassificationTranslator implements Translator<String, Classifi
          * @param arguments the model arguments
          */
         public void configure(Map<String, ?> arguments) {
+            optIncludeTokenTypes(ArgumentsUtil.booleanValue(arguments, "includeTokenTypes"));
             String batchifierStr = ArgumentsUtil.stringValue(arguments, "batchifier", "stack");
             optBatchifier(Batchifier.fromString(batchifierStr));
         }
@@ -161,7 +194,7 @@ public class TextClassificationTranslator implements Translator<String, Classifi
          * @throws IOException if I/O error occurs
          */
         public TextClassificationTranslator build() throws IOException {
-            return new TextClassificationTranslator(tokenizer, batchifier);
+            return new TextClassificationTranslator(tokenizer, includeTokenTypes, batchifier);
         }
     }
 }

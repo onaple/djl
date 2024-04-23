@@ -18,6 +18,7 @@ import ai.djl.huggingface.tokenizers.jni.CharSpan;
 import ai.djl.modality.nlp.translator.NamedEntity;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDList;
+import ai.djl.ndarray.NDManager;
 import ai.djl.translate.ArgumentsUtil;
 import ai.djl.translate.Batchifier;
 import ai.djl.translate.Translator;
@@ -36,11 +37,19 @@ import java.util.Map;
 public class TokenClassificationTranslator implements Translator<String, NamedEntity[]> {
 
     private HuggingFaceTokenizer tokenizer;
+    private boolean includeTokenTypes;
+    private boolean softmax;
     private Batchifier batchifier;
     private PretrainedConfig config;
 
-    TokenClassificationTranslator(HuggingFaceTokenizer tokenizer, Batchifier batchifier) {
+    TokenClassificationTranslator(
+            HuggingFaceTokenizer tokenizer,
+            boolean includeTokenTypes,
+            boolean softmax,
+            Batchifier batchifier) {
         this.tokenizer = tokenizer;
+        this.includeTokenTypes = includeTokenTypes;
+        this.softmax = softmax;
         this.batchifier = batchifier;
     }
 
@@ -65,21 +74,39 @@ public class TokenClassificationTranslator implements Translator<String, NamedEn
     public NDList processInput(TranslatorContext ctx, String input) {
         Encoding encoding = tokenizer.encode(input);
         ctx.setAttachment("encoding", encoding);
-        return encoding.toNDList(ctx.getNDManager(), false);
+        return encoding.toNDList(ctx.getNDManager(), includeTokenTypes);
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public NDList batchProcessInput(TranslatorContext ctx, List<String> inputs) {
+        NDManager manager = ctx.getNDManager();
+        Encoding[] encodings = tokenizer.batchEncode(inputs);
+        ctx.setAttachment("encodings", encodings);
+        NDList[] batch = new NDList[encodings.length];
+        for (int i = 0; i < encodings.length; ++i) {
+            batch[i] = encodings[i].toNDList(manager, includeTokenTypes);
+        }
+        return batchifier.batchify(batch);
     }
 
     /** {@inheritDoc} */
     @Override
     public NamedEntity[] processOutput(TranslatorContext ctx, NDList list) {
         Encoding encoding = (Encoding) ctx.getAttachment("encoding");
-        return toNamedEntities(encoding, list, config);
+        return toNamedEntities(encoding, list);
     }
 
     /** {@inheritDoc} */
     @Override
-    public TokenClassificationBatchTranslator toBatchTranslator(Batchifier batchifier) {
-        tokenizer.enableBatch();
-        return new TokenClassificationBatchTranslator(tokenizer, batchifier);
+    public List<NamedEntity[]> batchProcessOutput(TranslatorContext ctx, NDList list) {
+        NDList[] batch = batchifier.unbatchify(list);
+        Encoding[] encodings = (Encoding[]) ctx.getAttachment("encodings");
+        List<NamedEntity[]> ret = new ArrayList<>(batch.length);
+        for (int i = 0; i < batch.length; ++i) {
+            ret.add(toNamedEntities(encodings[i], batch[i]));
+        }
+        return ret;
     }
 
     /**
@@ -106,12 +133,15 @@ public class TokenClassificationTranslator implements Translator<String, NamedEn
         return builder;
     }
 
-    static NamedEntity[] toNamedEntities(Encoding encoding, NDList list, PretrainedConfig config) {
-        NDArray logits = list.get(0);
+    private NamedEntity[] toNamedEntities(Encoding encoding, NDList list) {
         long[] inputIds = encoding.getIds();
         CharSpan[] offsetMapping = encoding.getCharTokenSpans();
         long[] specialTokenMasks = encoding.getSpecialTokenMask();
-        NDArray probabilities = logits.softmax(1);
+        NDArray probabilities = list.get(0);
+        if (softmax) {
+            probabilities = probabilities.softmax(1);
+        }
+
         List<NamedEntity> entities = new ArrayList<>();
 
         for (int i = 0; i < inputIds.length; ++i) {
@@ -139,10 +169,34 @@ public class TokenClassificationTranslator implements Translator<String, NamedEn
     public static final class Builder {
 
         private HuggingFaceTokenizer tokenizer;
+        private boolean includeTokenTypes;
+        private boolean softmax = true;
         private Batchifier batchifier = Batchifier.STACK;
 
         Builder(HuggingFaceTokenizer tokenizer) {
             this.tokenizer = tokenizer;
+        }
+
+        /**
+         * Sets if include token types for the {@link Translator}.
+         *
+         * @param includeTokenTypes true to include token types
+         * @return this builder
+         */
+        public Builder optIncludeTokenTypes(boolean includeTokenTypes) {
+            this.includeTokenTypes = includeTokenTypes;
+            return this;
+        }
+
+        /**
+         * Sets if implement softmax operation for the {@link Translator}.
+         *
+         * @param softmax true to implement softmax to model output result
+         * @return this builder
+         */
+        public Builder optSoftmax(boolean softmax) {
+            this.softmax = softmax;
+            return this;
         }
 
         /**
@@ -162,6 +216,8 @@ public class TokenClassificationTranslator implements Translator<String, NamedEn
          * @param arguments the model arguments
          */
         public void configure(Map<String, ?> arguments) {
+            optIncludeTokenTypes(ArgumentsUtil.booleanValue(arguments, "includeTokenTypes"));
+            optSoftmax(ArgumentsUtil.booleanValue(arguments, "softmax", true));
             String batchifierStr = ArgumentsUtil.stringValue(arguments, "batchifier", "stack");
             optBatchifier(Batchifier.fromString(batchifierStr));
         }
@@ -173,7 +229,8 @@ public class TokenClassificationTranslator implements Translator<String, NamedEn
          * @throws IOException if I/O error occurs
          */
         public TokenClassificationTranslator build() throws IOException {
-            return new TokenClassificationTranslator(tokenizer, batchifier);
+            return new TokenClassificationTranslator(
+                    tokenizer, includeTokenTypes, softmax, batchifier);
         }
     }
 }

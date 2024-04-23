@@ -34,10 +34,13 @@ import org.testng.Assert;
 import org.testng.annotations.Test;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class TextEmbeddingTranslatorTest {
@@ -58,6 +61,24 @@ public class TextEmbeddingTranslatorTest {
                         "model");
         Path modelDir = Paths.get("build/model");
         Files.createDirectories(modelDir);
+        try (NDManager manager = NDManager.newBaseManager("Rust")) {
+            NDArray weight = manager.ones(new Shape(256, 384));
+            weight.setName("linear.weight");
+            NDList linear = new NDList(weight);
+            Path file = modelDir.resolve("linear.safetensors");
+            try (OutputStream os = Files.newOutputStream(file)) {
+                linear.encode(os, NDList.Encoding.SAFETENSORS);
+            }
+            NDArray normWeight = manager.ones(new Shape(256));
+            normWeight.setName("norm.weight");
+            NDArray bias = manager.ones(new Shape(256));
+            bias.setName("norm.bias");
+            NDList norm = new NDList(normWeight, bias);
+            file = modelDir.resolve("norm.safetensors");
+            try (OutputStream os = Files.newOutputStream(file)) {
+                norm.encode(os, NDList.Encoding.SAFETENSORS);
+            }
+        }
 
         Criteria<String, float[]> criteria =
                 Criteria.builder()
@@ -137,6 +158,27 @@ public class TextEmbeddingTranslatorTest {
             Assertions.assertAlmostEquals(res[0], 0.05103104);
         }
 
+        // dense and layerNorm
+        criteria =
+                Criteria.builder()
+                        .setTypes(String.class, float[].class)
+                        .optModelPath(modelDir)
+                        .optBlock(block)
+                        .optEngine("PyTorch")
+                        .optArgument("tokenizer", "bert-base-uncased")
+                        .optArgument("dense", "linear.safetensors")
+                        .optArgument("denseActivation", "Tanh")
+                        .optArgument("layerNorm", "norm.safetensors")
+                        .optOption("hasParameter", "false")
+                        .optTranslatorFactory(new TextEmbeddingTranslatorFactory())
+                        .build();
+
+        try (ZooModel<String, float[]> model = criteria.loadModel();
+                Predictor<String, float[]> predictor = model.newPredictor()) {
+            float[] res = predictor.predict(text);
+            Assert.assertEquals(res.length, 256);
+        }
+
         Criteria<Input, Output> criteria2 =
                 Criteria.builder()
                         .setTypes(Input.class, Output.class)
@@ -155,6 +197,16 @@ public class TextEmbeddingTranslatorTest {
             input.add(text);
             Output out = predictor.predict(input);
             float[] res = JsonUtils.GSON.fromJson(out.getAsString(0), float[].class);
+            Assert.assertEquals(res.length, 384);
+            Assertions.assertAlmostEquals(res[0], 0.05103);
+
+            input = new Input();
+            Map<String, String> map = new HashMap<>();
+            map.put("inputs", text);
+            input.add(JsonUtils.GSON.toJson(map));
+            input.addProperty("Content-Type", "application/json");
+            out = predictor.predict(input);
+            res = (float[]) out.getData().getAsObject();
             Assert.assertEquals(res.length, 384);
             Assertions.assertAlmostEquals(res[0], 0.05103);
         }
@@ -181,7 +233,7 @@ public class TextEmbeddingTranslatorTest {
     }
 
     @Test
-    public void testTextEmbeddingBatchTranslator()
+    public void testTextEmbeddingTranslatorServingBatch()
             throws ModelException, IOException, TranslateException {
         String[] text = {"This is an example sentence", "This is the second sentence"};
 
@@ -189,7 +241,7 @@ public class TextEmbeddingTranslatorTest {
                 new LambdaBlock(
                         a -> {
                             NDManager manager = a.getManager();
-                            NDArray arr = manager.ones(new Shape(2, 7, 384));
+                            NDArray arr = manager.ones(new Shape(4, 7, 384));
                             arr.setName("last_hidden_state");
                             return new NDList(arr);
                         },
@@ -197,44 +249,33 @@ public class TextEmbeddingTranslatorTest {
         Path modelDir = Paths.get("build/model");
         Files.createDirectories(modelDir);
 
-        Criteria<String[], float[][]> criteria =
-                Criteria.builder()
-                        .setTypes(String[].class, float[][].class)
-                        .optModelPath(modelDir)
-                        .optBlock(block)
-                        .optEngine("PyTorch")
-                        .optArgument("tokenizer", "bert-base-uncased")
-                        .optArgument("padding", "true")
-                        .optOption("hasParameter", "false")
-                        .optTranslatorFactory(new TextEmbeddingTranslatorFactory())
-                        .build();
-
-        try (ZooModel<String[], float[][]> model = criteria.loadModel();
-                Predictor<String[], float[][]> predictor = model.newPredictor()) {
-            float[][] res = predictor.predict(text);
-            Assert.assertEquals(res[0].length, 384);
-            Assertions.assertAlmostEquals(res[0][0], 0.05103);
-        }
-
-        Criteria<Input, Output> criteria2 =
+        Criteria<Input, Output> criteria =
                 Criteria.builder()
                         .setTypes(Input.class, Output.class)
                         .optModelPath(modelDir)
                         .optBlock(block)
                         .optEngine("PyTorch")
                         .optArgument("tokenizer", "bert-base-uncased")
-                        .optArgument("padding", "true")
                         .optOption("hasParameter", "false")
                         .optTranslatorFactory(new TextEmbeddingTranslatorFactory())
                         .build();
 
-        try (ZooModel<Input, Output> model = criteria2.loadModel();
+        try (ZooModel<Input, Output> model = criteria.loadModel();
                 Predictor<Input, Output> predictor = model.newPredictor()) {
-            Input input = new Input();
-            input.add(JsonUtils.GSON.toJson(text));
-            input.addProperty("Content-Type", "application/json");
-            Output out = predictor.predict(input);
-            float[][] res = (float[][]) out.getData().getAsObject();
+            Input input1 = new Input();
+            input1.add(JsonUtils.GSON.toJson(text));
+            input1.addProperty("Content-Type", "application/json");
+
+            Input input2 = new Input();
+            Map<String, String[]> map = new HashMap<>();
+            map.put("inputs", text);
+            input2.add(JsonUtils.GSON.toJson(map));
+            input2.addProperty("Content-Type", "application/json");
+            List<Input> batchInput = Arrays.asList(input1, input2);
+
+            List<Output> batchOutput = predictor.batchPredict(batchInput);
+            Assert.assertEquals(batchOutput.size(), 2);
+            float[][] res = (float[][]) batchOutput.get(0).getData().getAsObject();
             Assert.assertEquals(res[0].length, 384);
             Assertions.assertAlmostEquals(res[0][0], 0.05103);
         }

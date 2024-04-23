@@ -81,17 +81,18 @@ The following pseudocode demonstrates running training:
 
 - [Documentation](docs/README.md#documentation)
 - [DJL's D2L Book](https://d2l.djl.ai/)
-- [JavaDoc API Reference](https://javadoc.djl.ai/)
+- [JavaDoc API Reference](https://djl.ai/website/javadoc.html)
 
 ## Release Notes
 
+* [0.27.0](https://github.com/deepjavalibrary/djl/releases/tag/v0.27.0) ([Code](https://github.com/deepjavalibrary/djl/tree/v0.27.0))
 * [0.26.0](https://github.com/deepjavalibrary/djl/releases/tag/v0.26.0) ([Code](https://github.com/deepjavalibrary/djl/tree/v0.26.0))
 * [0.25.0](https://github.com/deepjavalibrary/djl/releases/tag/v0.25.0) ([Code](https://github.com/deepjavalibrary/djl/tree/v0.25.0))
 * [0.24.0](https://github.com/deepjavalibrary/djl/releases/tag/v0.24.0) ([Code](https://github.com/deepjavalibrary/djl/tree/v0.24.0))
 * [0.23.0](https://github.com/deepjavalibrary/djl/releases/tag/v0.23.0) ([Code](https://github.com/deepjavalibrary/djl/tree/v0.23.0))
 * [+23 releases](https://github.com/deepjavalibrary/djl/releases)
 
-The release of DJL 0.27.0 is planned for March 2024.
+The release of DJL 0.28.0 is planned for May 2024.
 
 ## Building From Source
 

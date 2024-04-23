@@ -10,19 +10,27 @@
 # or in the "LICENSE.txt" file accompanying this file. This file is distributed on an "AS IS"
 # BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, express or implied. See the License for
 # the specific language governing permissions and limitations under the License.
-
 import logging
 import os.path
 import shutil
+import sys
 from argparse import Namespace
 
+import onnx
 import torch
 from huggingface_hub import hf_hub_download
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer
 
 from metadata import HuggingfaceMetadata
 from shasum import sha1_sum
 from zip_utils import zip_dir
+
+
+class PipelineHolder(object):
+
+    def __init__(self, tokenizer, model):
+        self.tokenizer = tokenizer
+        self.model = model
 
 
 class HuggingfaceConverter:
@@ -37,6 +45,40 @@ class HuggingfaceConverter:
         self.outputs = None
 
     def save_model(self, model_info, args: Namespace, temp_dir: str):
+        if args.output_format == "OnnxRuntime":
+            return self.save_onnx_model(model_info, args, temp_dir)
+        else:
+            return self.save_pytorch_model(model_info, args, temp_dir)
+
+    def save_onnx_model(self, model_info, args: Namespace, temp_dir: str):
+        model_id = model_info.modelId
+
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+
+        logging.info(f"Saving onnxruntime model: {model_id} ...")
+
+        from optimum.commands.optimum_cli import main
+
+        sys.argv = [
+            "model_zoo_importer.py", "export", "onnx", "-m", model_id, temp_dir
+        ]
+        main()
+
+        model = onnx.load_model(os.path.join(temp_dir, "model.onnx"),
+                                load_external_data=False)
+        inputs = repr(model.graph.input)
+        include_types = "token_type_id" in inputs
+
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        hf_pipeline = PipelineHolder(tokenizer, model)
+        size = self.save_to_model_zoo(model_info, args.output_dir,
+                                      "OnnxRuntime", temp_dir, hf_pipeline,
+                                      include_types)
+
+        return True, None, size
+
+    def save_pytorch_model(self, model_info, args: Namespace, temp_dir: str):
         model_id = model_info.modelId
         if not os.path.exists(temp_dir):
             os.makedirs(temp_dir)
@@ -130,26 +172,28 @@ class HuggingfaceConverter:
 
         return model_file
 
-    def save_to_model_zoo(self, model_info, output_dir: str, temp_dir: str,
-                          hf_pipeline, include_types: bool):
+    def save_to_model_zoo(self, model_info, output_dir: str, engine: str,
+                          temp_dir: str, hf_pipeline, include_types: bool):
         model_id = model_info.modelId
         model_name = model_id.split("/")[-1]
-
-        repo_dir = f"{output_dir}/model/{self.application}/ai/djl/huggingface/pytorch/{model_id}"
+        group_id = f"ai/djl/huggingface/{engine.lower()}"
+        repo_dir = f"{output_dir}/model/{self.application}/{group_id}/{model_id}"
         model_dir = f"{repo_dir}/0.0.1"
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
 
         # Save serving.properties
         serving_file = os.path.join(temp_dir, "serving.properties")
-        arguments = self.get_extra_arguments(hf_pipeline, model_id)
+        arguments = self.get_extra_arguments(hf_pipeline, model_id, temp_dir)
+        if include_types:
+            arguments["includeTokenTypes"] = "true"
+        arguments["translatorFactory"] = self.translator
+
         with open(serving_file, 'w') as f:
-            f.write(f"engine=PyTorch\n"
-                    f"option.modelName={model_name}\n"
-                    f"option.mapLocation=true\n"
-                    f"translatorFactory={self.translator}\n")
-            if include_types:
-                f.write(f"includeTokenTypes={include_types}\n")
+            f.write(f"engine={engine}\n"
+                    f"option.modelName={model_name}\n")
+            if engine == "PyTorch":
+                f.write(f"option.mapLocation=true\n")
 
             for k, v in arguments.items():
                 f.write(f"{k}={v}\n")
@@ -160,10 +204,11 @@ class HuggingfaceConverter:
         zip_dir(temp_dir, zip_file)
 
         # Save metadata.json
+        arguments["engine"] = engine
         sha1 = sha1_sum(zip_file)
         file_size = os.path.getsize(zip_file)
-        metadata = HuggingfaceMetadata(model_info, self.application,
-                                       self.translator, sha1, file_size)
+        metadata = HuggingfaceMetadata(model_info, engine, self.application,
+                                       sha1, file_size, arguments)
         metadata_file = os.path.join(repo_dir, "metadata.json")
         metadata.save_metadata(metadata_file)
 
@@ -205,7 +250,8 @@ class HuggingfaceConverter:
 
         return self.verify_jit_output(hf_pipeline, encoding, out)
 
-    def get_extra_arguments(self, hf_pipeline, model_id: str) -> dict:
+    def get_extra_arguments(self, hf_pipeline, model_id: str,
+                            temp_dir: str) -> dict:
         return {}
 
     def verify_jit_output(self, hf_pipeline, encoding, out):

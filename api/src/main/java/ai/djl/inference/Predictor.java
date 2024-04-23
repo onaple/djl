@@ -153,41 +153,42 @@ public class Predictor<I, O> implements AutoCloseable {
      * @return a list of output objects defined by the user
      * @throws TranslateException if an error occurs during prediction
      */
-    @SuppressWarnings({"PMD.AvoidRethrowingException", "PMD.IdenticalCatchBranches"})
+    @SuppressWarnings({"PMD.AvoidRethrowingException", "PMD.IdenticalCatchBranches", "unchecked"})
     public List<O> batchPredict(List<I> inputs) throws TranslateException {
-        long begin = System.nanoTime();
         try (PredictorContext context = new PredictorContext()) {
             if (!prepared) {
                 translator.prepare(context);
                 prepared = true;
             }
-            Batchifier batchifier = translator.getBatchifier();
-            if (batchifier == null) {
+            if (translator.getBatchifier() == null) {
                 List<O> ret = new ArrayList<>(inputs.size());
                 for (I input : inputs) {
                     timestamp = System.nanoTime();
-                    begin = timestamp;
+                    long begin = timestamp;
                     NDList ndList = translator.processInput(context, input);
-                    preprocessEnd(ndList);
+                    preprocessEnd(ndList, 1);
 
                     NDList result = predictInternal(context, ndList);
-                    predictEnd(result);
+                    predictEnd(result, 1);
 
                     ret.add(translator.processOutput(context, result));
-                    postProcessEnd(begin);
+                    postProcessEnd(begin, 1);
                 }
                 return ret;
             }
 
+            int batchSize = inputs.size();
+
             timestamp = System.nanoTime();
-            NDList inputBatch = processInputs(context, inputs);
-            preprocessEnd(inputBatch);
+            long begin = timestamp;
+            NDList ndList = translator.batchProcessInput(context, inputs);
+            preprocessEnd(ndList, batchSize);
 
-            NDList result = predictInternal(context, inputBatch);
-            predictEnd(result);
+            NDList result = predictInternal(context, ndList);
+            predictEnd(result, batchSize);
 
-            List<O> ret = processOutputs(context, result);
-            postProcessEnd(begin);
+            List<O> ret = translator.batchProcessOutput(context, result);
+            postProcessEnd(begin, batchSize);
             return ret;
         } catch (TranslateException e) {
             throw e;
@@ -302,40 +303,30 @@ public class Predictor<I, O> implements AutoCloseable {
         return translator.getBatchifier().batchify(preprocessed);
     }
 
-    @SuppressWarnings("PMD.SignatureDeclareThrowsException")
-    private List<O> processOutputs(TranslatorContext ctx, NDList list) throws Exception {
-        NDList[] unbatched = translator.getBatchifier().unbatchify(list);
-        List<O> outputs = new ArrayList<>(unbatched.length);
-        for (NDList output : unbatched) {
-            outputs.add(translator.processOutput(ctx, output));
-        }
-        return outputs;
-    }
-
-    private void preprocessEnd(NDList list) {
+    private void preprocessEnd(NDList list, int batchSize) {
         if (metrics != null) {
             waitToRead(list);
             long tmp = System.nanoTime();
-            long duration = (tmp - timestamp) / 1000;
+            long duration = (tmp - timestamp) / 1000 / batchSize;
             timestamp = tmp;
             metrics.addMetric("Preprocess", duration, Unit.MICROSECONDS, dimension);
         }
     }
 
-    private void predictEnd(NDList list) {
+    private void predictEnd(NDList list, int batchSize) {
         if (metrics != null) {
             waitToRead(list);
             long tmp = System.nanoTime();
-            long duration = (tmp - timestamp) / 1000;
+            long duration = (tmp - timestamp) / 1000 / batchSize;
             timestamp = tmp;
             metrics.addMetric("Inference", duration, Unit.MICROSECONDS, dimension);
         }
     }
 
-    private void postProcessEnd(long begin) {
+    private void postProcessEnd(long begin, int batchSize) {
         if (metrics != null) {
             long tmp = System.nanoTime();
-            long duration = (tmp - timestamp) / 1000;
+            long duration = (tmp - timestamp) / 1000 / batchSize;
             timestamp = tmp;
             metrics.addMetric("Postprocess", duration, Unit.MICROSECONDS, dimension);
             long prediction = (tmp - begin) / 1000;

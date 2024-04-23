@@ -16,13 +16,17 @@ import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.djl.ndarray.NDArray;
 import ai.djl.ndarray.NDList;
+import ai.djl.ndarray.NDManager;
 import ai.djl.translate.ArgumentsUtil;
 import ai.djl.translate.Batchifier;
 import ai.djl.translate.Translator;
 import ai.djl.translate.TranslatorContext;
+import ai.djl.util.PairList;
 import ai.djl.util.StringPair;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /** The translator for Huggingface cross encoder model. */
@@ -30,12 +34,17 @@ public class CrossEncoderTranslator implements Translator<StringPair, float[]> {
 
     private HuggingFaceTokenizer tokenizer;
     private boolean includeTokenTypes;
+    private boolean sigmoid;
     private Batchifier batchifier;
 
     CrossEncoderTranslator(
-            HuggingFaceTokenizer tokenizer, boolean includeTokenTypes, Batchifier batchifier) {
+            HuggingFaceTokenizer tokenizer,
+            boolean includeTokenTypes,
+            boolean sigmoid,
+            Batchifier batchifier) {
         this.tokenizer = tokenizer;
         this.includeTokenTypes = includeTokenTypes;
+        this.sigmoid = sigmoid;
         this.batchifier = batchifier;
     }
 
@@ -55,17 +64,40 @@ public class CrossEncoderTranslator implements Translator<StringPair, float[]> {
 
     /** {@inheritDoc} */
     @Override
-    public float[] processOutput(TranslatorContext ctx, NDList list) {
-        NDArray logits = list.get(0);
-        NDArray result = logits.getNDArrayInternal().sigmoid();
-        return result.toFloatArray();
+    public NDList batchProcessInput(TranslatorContext ctx, List<StringPair> inputs) {
+        NDManager manager = ctx.getNDManager();
+        PairList<String, String> list = new PairList<>(inputs);
+        Encoding[] encodings = tokenizer.batchEncode(list);
+        NDList[] batch = new NDList[encodings.length];
+        for (int i = 0; i < encodings.length; ++i) {
+            batch[i] = encodings[i].toNDList(manager, includeTokenTypes);
+        }
+        return batchifier.batchify(batch);
     }
 
     /** {@inheritDoc} */
     @Override
-    public CrossEncoderBatchTranslator toBatchTranslator(Batchifier batchifier) {
-        tokenizer.enableBatch();
-        return new CrossEncoderBatchTranslator(tokenizer, includeTokenTypes, batchifier);
+    public float[] processOutput(TranslatorContext ctx, NDList list) {
+        NDArray logits = list.get(0);
+        if (sigmoid) {
+            logits = logits.getNDArrayInternal().sigmoid();
+        }
+        return logits.toFloatArray();
+    }
+
+    /** {@inheritDoc} */
+    @Override
+    public List<float[]> batchProcessOutput(TranslatorContext ctx, NDList list) {
+        NDList[] batches = batchifier.unbatchify(list);
+        List<float[]> ret = new ArrayList<>(batches.length);
+        for (NDList batch : batches) {
+            NDArray result = batch.get(0);
+            if (sigmoid) {
+                result = result.getNDArrayInternal().sigmoid();
+            }
+            ret.add(result.toFloatArray());
+        }
+        return ret;
     }
 
     /**
@@ -97,6 +129,7 @@ public class CrossEncoderTranslator implements Translator<StringPair, float[]> {
 
         private HuggingFaceTokenizer tokenizer;
         private boolean includeTokenTypes;
+        private boolean sigmoid = true;
         private Batchifier batchifier = Batchifier.STACK;
 
         Builder(HuggingFaceTokenizer tokenizer) {
@@ -111,6 +144,17 @@ public class CrossEncoderTranslator implements Translator<StringPair, float[]> {
          */
         public Builder optIncludeTokenTypes(boolean includeTokenTypes) {
             this.includeTokenTypes = includeTokenTypes;
+            return this;
+        }
+
+        /**
+         * Sets if apply sigmoid for the {@link Translator}.
+         *
+         * @param sigmoid true to apply sigmoid
+         * @return this builder
+         */
+        public Builder optSigmoid(boolean sigmoid) {
+            this.sigmoid = sigmoid;
             return this;
         }
 
@@ -132,6 +176,7 @@ public class CrossEncoderTranslator implements Translator<StringPair, float[]> {
          */
         public void configure(Map<String, ?> arguments) {
             optIncludeTokenTypes(ArgumentsUtil.booleanValue(arguments, "includeTokenTypes"));
+            optSigmoid(ArgumentsUtil.booleanValue(arguments, "sigmoid", true));
             String batchifierStr = ArgumentsUtil.stringValue(arguments, "batchifier", "stack");
             optBatchifier(Batchifier.fromString(batchifierStr));
         }
@@ -143,7 +188,7 @@ public class CrossEncoderTranslator implements Translator<StringPair, float[]> {
          * @throws IOException if I/O error occurs
          */
         public CrossEncoderTranslator build() throws IOException {
-            return new CrossEncoderTranslator(tokenizer, includeTokenTypes, batchifier);
+            return new CrossEncoderTranslator(tokenizer, includeTokenTypes, sigmoid, batchifier);
         }
     }
 }

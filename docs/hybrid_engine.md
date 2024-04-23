@@ -5,7 +5,6 @@
 Many of DJL engines only has limited support for NDArray operations. Here is a list of such engines:
 
 - [ONNX Runtime](../engines/onnxruntime/onnxruntime-engine/README.md)
-- [PaddlePaddle](../engines/paddlepaddle/README.md)
 - [TFLite](../engines/tflite/tflite-engine/README.md)
 - [TensorRT](../engines/tensorrt/README.md)
 
@@ -21,17 +20,17 @@ to run in a hybrid mode:
 To use it along with Apache MXNet for additional API support, add the following two dependencies:
 
 ```
-runtimeOnly "ai.djl.mxnet:mxnet-engine:0.26.0"
+runtimeOnly "ai.djl.mxnet:mxnet-engine:0.27.0"
 ```
 
 You can also use PyTorch or TensorFlow Engine as the supplemental engine by adding their corresponding dependencies.
 
 ```
-runtimeOnly "ai.djl.pytorch:pytorch-engine:0.26.0"
+runtimeOnly "ai.djl.pytorch:pytorch-engine:0.27.0"
 ```
 
 ```
-runtimeOnly "ai.djl.tensorflow:tensorflow-engine:0.26.0"
+runtimeOnly "ai.djl.tensorflow:tensorflow-engine:0.27.0"
 ```
 
 ## How Hybrid works
@@ -45,9 +44,6 @@ at runtime, you can disable this behavior by setting the following system proper
 ```
 # disable hybrid engine for OnnxRuntime
 System.setProperty("ai.djl.onnx.disable_alternative", "true");
-
-# disable hybrid engine for PaddlePaddle
-System.setProperty("ai.djl.paddlepaddle.disable_alternative", "true");
 
 # disable hybrid engine for TensorFlow Lite
 System.setProperty("ai.djl.tflite.disable_alternative", "true");
